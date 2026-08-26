@@ -110,6 +110,11 @@ the easier way in:
 - **Word finder**: click a note, and it lists words whose tones that melody
   will actually accept, filtered by rhyme if you want. That intersection is the
   thing no other tool does.
+- **The melody already exists**: paste a tune you wrote first, in numbered
+  notation (`1 2 3 5`) or note names, or drop in a MIDI export.
+- **Fix the lyrics to the melody**: every clash, with words that would sit on
+  those exact notes instead. Click one and it goes into the lyrics, melody
+  untouched.
 
 It is a static page. The whole model is 109 KB of JSON and about 250 lines of
 JavaScript, so there is no backend, nothing is uploaded, and it works on a
@@ -141,6 +146,69 @@ Two severities:
 - **unusual** (`?`): no hard rule, but this move is rare. Rising off tone 1
   onto another tone 1 happens 5.2% of the time, because nothing sits above
   tone 1. Singable, just uncommon.
+
+The melody can come from numbered notation (簡譜) or a MIDI export instead of
+note names, which beats retyping a tune you already have:
+
+```bash
+cantojam check "今日天氣真係好" --degrees "1 2 3 5 6 5 3" --key "F major"
+cantojam check "今日天氣真係好" --midi verse.mid
+```
+
+`'` lifts a degree an octave, `.` drops one, `#` and `b` bend a semitone, and
+`0` is a rest. A MIDI file is read with no dependencies, taking the track with
+the most notes and the top note of any chord.
+
+### Fix the lyrics to a melody you already wrote
+
+`check` says which syllables fight the tune. `fit` says what to do about it.
+
+```bash
+$ cantojam fit "今日天氣真係好" --degrees "1 2 3 5 6 5 3"
+   今  gam1     F4     .
+ X 日  jat6     G4    +2
+   天  tin1     A4    +2
+ X 氣  hei3     C5    +3
+   真  zan1     D5    +2
+   係  hai6     C5    -2
+ X 好  hou2     A4    -3
+
+X 今日 (tone 1->6) should fall; this melody rises. Corpus median -3 semitones
+  over 736 examples.
+    phrases the corpus wrote as a unit:
+    今日 -> 沒有    mut6 jau5    tones 65   -au    98x
+        沒有天氣真係好
+    今日 -> 爲何    wai4 ho4     tones 44   -o     33x
+        爲何天氣真係好   sing 爲=wai4
+    ...
+    single characters that fit the notes, sense is yours to judge:
+    今 -> 來       loi4         tones 4    -oi    237x
+        來日天氣真係好
+```
+
+Every candidate has to satisfy the tone rules inside itself **and** at both
+seams with the syllables around it, so a fix at one clash cannot quietly break
+the next one. `tests/test_parity.py` checks that invariant directly: for every
+suggestion, substituting it and rechecking leaves that seam clean.
+
+Phrases come first because the corpus wrote them as a unit. Single characters
+fit the notes but not necessarily the sense: the corpus's n-grams are raw
+sequences, so a real word like 舊日 and a boundary crossing like 日你 look alike
+by frequency and score the same PMI. There is no honest way to tell them apart
+from this data, so the two are labelled and separated rather than filtered.
+
+A candidate is admitted on the reading the corpus sang it with, which is not
+always the default reading of those characters. 爲何 is offered as `wai4 ho4`
+while 爲 alone reads `wai6`, and that one tone decides whether the line fits, so
+those cases print `sing 爲=wai4` rather than being silently dropped.
+
+Useful flags:
+
+- `--no-keep-rhyme` lets a swap on the last syllable change the line's rime,
+  which is protected by default
+- `--min-count 1` admits words the corpus used only once
+- `--allow-unusual` keeps moves the corpus almost never makes
+- `--json` for the whole report, if you are wiring this into something
 
 ### Draft a contour from lyrics
 

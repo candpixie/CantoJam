@@ -276,3 +276,130 @@ class TestCorpusAgreement:
         melody = [62, 64, 66, 64, 62, 61, 57]
         result = check(line, melody)
         assert len(result["violations"]) <= 1
+
+
+# --- numbered notation, MIDI import, and lyric repair ----------------------
+
+from cantojam import midi                                       # noqa: E402
+from cantojam.check import parse_degrees                        # noqa: E402
+from cantojam.contour import build_contour                      # noqa: E402
+from cantojam.fit import repairs                                # noqa: E402
+
+
+def test_degrees_are_the_scale_of_the_key():
+    assert parse_degrees("1 2 3 4 5 6 7", "C major") == [60, 62, 64, 65, 67,
+                                                         69, 71]
+    assert parse_degrees("1", "F major") == parse_melody("F4")
+    assert parse_degrees("1 3 5", "A minor") == parse_melody("A4 C5 E5")
+
+
+def test_degree_modifiers():
+    assert parse_degrees("1' 1 1.", "C major") == [72, 60, 48]
+    assert parse_degrees("#4 b7", "C major") == [66, 70]
+    assert parse_degrees("1 0 2", "C major") == [60, 62]   # a rest sings nothing
+    assert parse_degrees("1", "C major", octave=3) == [48]
+    with pytest.raises(ValueError):
+        parse_degrees("8", "C major")
+
+
+def _write_midi(path, pitches, chord=()):
+    """Smallest type 1 file that carries these notes, one per beat."""
+    import struct
+
+    def var(n):
+        out = [n & 0x7F]
+        n >>= 7
+        while n:
+            out.insert(0, (n & 0x7F) | 0x80)
+            n >>= 7
+        return bytes(out)
+
+    events = b""
+    for pitch in pitches:
+        events += var(0) + bytes([0x90, pitch, 80])
+        for extra in chord:
+            events += var(0) + bytes([0x90, pitch + extra, 80])
+        events += var(240) + bytes([0x80, pitch, 0])
+        for extra in chord:
+            events += var(0) + bytes([0x80, pitch + extra, 0])
+    events += var(0) + b"\xff\x2f\x00"
+    tempo = var(0) + b"\xff\x51\x03" + bytes([7, 0xA1, 0x20]) + var(0) \
+        + b"\xff\x2f\x00"
+
+    def track(body):
+        return b"MTrk" + struct.pack(">I", len(body)) + body
+
+    path.write_bytes(b"MThd" + struct.pack(">IHHH", 6, 1, 2, 480)
+                     + track(tempo) + track(events))
+    return str(path)
+
+
+def test_midi_round_trip(tmp_path):
+    pitches = [65, 67, 69, 72, 74, 72, 69]
+    path = _write_midi(tmp_path / "melody.mid", pitches)
+    assert midi.read(path) == pitches
+    # Track 0 holds only tempo, so the reader must not pick it.
+    assert midi.track_summary(path) == [(0, 0), (1, len(pitches))]
+
+
+def test_midi_keeps_the_top_of_a_chord(tmp_path):
+    """A syllable is sung on one pitch, so a chord collapses to its melody."""
+    path = _write_midi(tmp_path / "chords.mid", [60, 62], chord=(4, 7))
+    assert midi.read(path) == [67, 69]
+
+
+def test_midi_rejects_other_files(tmp_path):
+    bad = tmp_path / "not.mid"
+    bad.write_bytes(b"ID3\x04nope")
+    with pytest.raises(ValueError):
+        midi.read(str(bad))
+
+
+@pytest.mark.parametrize("line", LINES)
+def test_a_drafted_melody_needs_no_repair(line):
+    """build_contour writes a fitting melody, so fit must find nothing."""
+    contour = build_contour(line)
+    report = repairs(line, [n["midi"] for n in contour["notes"]])
+    assert report["clean"], report["problems"]
+
+
+@pytest.mark.parametrize("line", LINES[:6])
+def test_every_suggestion_resolves_the_clash_it_answers(line):
+    """The point of the tool: a suggestion that still clashes is worthless.
+
+    Candidates are admitted on the reading the corpus sang them with, so that
+    reading is pinned before rechecking, which is exactly what the printed
+    'sing X=jyutping' note tells the writer to do.
+    """
+    length = len(build_contour(line)["notes"])
+    checked = 0
+    # A straight ramp ignores the tones entirely, so one direction or the
+    # other is guaranteed to fight a line of this length.
+    for step in (2, -2):
+        melody = [65 + step * i for i in range(length)]
+        report = repairs(line, melody, limit=10)
+        for problem in report["problems"]:
+            for option in problem["phrases"] + problem["singles"]:
+                pins = dict(pair.split("=") for pair in option["pin"])
+                rows = check(option["line"], melody,
+                             lexicon=Lexicon(pins))["rows"]
+                assert not rows[problem["index"]]["violation"], (
+                    f"{option['replaces']} -> {option['word']} leaves "
+                    f"{rows[problem['index']]['char']} clashing")
+                checked += 1
+    assert checked, "no suggestions were produced to check"
+
+
+def test_keeping_the_rhyme_protects_the_last_syllable():
+    line, melody = "今日天氣真係好", parse_degrees("1 2 3 5 6 5 3")
+    rime = next(r["jyutping"] for r in reversed(check(line, melody)["rows"]))
+    kept = repairs(line, melody, keep_rhyme=True, limit=50)
+    for problem in kept["problems"]:
+        for option in problem["phrases"] + problem["singles"]:
+            if option["start"] + option["length"] == len(line):
+                assert option["rime"] == rime_of(rime)
+
+
+def rime_of(jyutping):
+    from cantojam.lexicon import rime
+    return rime(jyutping)

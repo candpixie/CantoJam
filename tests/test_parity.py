@@ -20,7 +20,9 @@ sys.path.insert(0, ROOT)
 
 from cantojam import (ToneModel, WordList, build_contour, check,  # noqa: E402
                       rime, syllabify)
+from cantojam.check import parse_degrees                         # noqa: E402
 from cantojam.contour import note_name, parse_key                # noqa: E402
+from cantojam.fit import repairs                                 # noqa: E402
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None,
                                 reason="node is not installed")
@@ -40,6 +42,9 @@ LINES = [
 ]
 
 KEYS = ["F major", "C major", "G major", "Bb major", "A minor", "D dorian"]
+
+DEGREES = ["1 2 3 4 5 6 7", "1' 1 1.", "#4 b7 5", "1 0 2 0 3",
+           "5. 6. 7. 1 2", "3 3 2 1 2 3 5"]
 
 
 def run_node(script):
@@ -64,16 +69,17 @@ def js():
     Deliberately a plain string with a placeholder rather than an f-string:
     the body is JavaScript, and f-string brace escaping made it unreadable.
     """
-    payload = {"lines": LINES, "keys": KEYS}
+    payload = {"lines": LINES, "keys": KEYS, "degrees": DEGREES}
     script = JS_PROBE.replace("__PAYLOAD__", json.dumps(payload))
     return run_node(script)
 
 
 JS_PROBE = """
 import * as cj from "./cantojam.js";
-const { lines, keys } = __PAYLOAD__;
+const { lines, keys, degrees } = __PAYLOAD__;
 const out = { syllabify: {}, contour: {}, check: {}, model: {},
-              notes: {}, keys: {}, rime: {}, search: {}, fitting: {} };
+              notes: {}, keys: {}, rime: {}, search: {}, fitting: {},
+              degrees: {}, repairs: {} };
 
 for (const line of lines) {
   out.syllabify[line] = cj.syllabify(line).map(s => [s.char, s.jyutping,
@@ -102,6 +108,11 @@ for (const a of "123456") {
   }
 }
 for (let m = 36; m <= 96; m += 1) out.notes[m] = cj.noteName(m);
+for (const text of degrees) {
+  for (const key of keys) {
+    out.degrees[text + "|" + key] = cj.parseDegrees(text, key);
+  }
+}
 for (const key of keys) {
   const { tonic, scale } = cj.parseKey(key);
   out.keys[key] = [tonic, scale];
@@ -134,6 +145,19 @@ for (const line of lines.slice(0, 5)) {
       out.fitting[key + "|loose"] = cj.fitting(pitches, tones, start, len,
         { minCount: 2, allowUnusual: true }).map(e => e.w);
     }
+  }
+}
+for (const line of lines.slice(0, 6)) {
+  for (const step of [2, -2]) {
+    const n = cj.syllabify(line).filter(s => !s.skipped).length;
+    const melody = Array.from({ length: n }, (_, i) => 65 + step * i);
+    const report = cj.repairs(line, melody, { limit: 5 });
+    out.repairs[line + "|" + step] = report.problems.map(p => [
+      p.index, p.kind,
+      p.phrases.map(o => [o.start, o.length, o.word, o.pin, o.line]),
+      p.singles.map(o => [o.start, o.length, o.word, o.pin, o.line]),
+      p.phraseTotal, p.singleTotal,
+    ]);
   }
 }
 console.log(JSON.stringify(out));
@@ -220,6 +244,34 @@ class TestLexiconParity:
                 pitches, tones, start, length, min_count=2,
                 allow_unusual=loose)]
             assert mine == expected, f"fitting differs for {key}"
+
+
+    def test_degrees(self, js):
+        for spec, expected in js["degrees"].items():
+            text, _, key = spec.rpartition("|")
+            assert parse_degrees(text, key) == expected, \
+                f"numbered notation differs for {spec}"
+
+    def test_repairs(self, js, words):
+        """The whole repair report, suggestion by suggestion.
+
+        Ordering is part of the contract here: the writer reads the top of the
+        list, so if the two implementations rank differently they are giving
+        different advice even when the sets match.
+        """
+        for spec, expected in js["repairs"].items():
+            line, _, step = spec.rpartition("|")
+            count = len([s for s in syllabify(line) if not s["skipped"]])
+            melody = [65 + int(step) * i for i in range(count)]
+            report = repairs(line, melody, limit=5, words=words)
+            mine = [[p["index"], p["kind"],
+                     [[o["start"], o["length"], o["word"], o["pin"], o["line"]]
+                      for o in p["phrases"]],
+                     [[o["start"], o["length"], o["word"], o["pin"], o["line"]]
+                      for o in p["singles"]],
+                     p["phrase_total"], p["single_total"]]
+                    for p in report["problems"]]
+            assert mine == expected, f"repairs differ for {spec}"
 
 
 class TestWebDataFreshness:

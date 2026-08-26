@@ -4,8 +4,11 @@ import argparse
 import json
 import sys
 
-from .check import check
+from . import midi
+from .check import check, parse_degrees, parse_melody
 from .contour import build_contour, render
+from .fit import render as render_fit
+from .fit import repairs
 from .jyutping import Lexicon, syllabify
 from .lexicon import Lexicon as WordList
 from .model import ToneModel
@@ -17,6 +20,37 @@ def read_lines(path):
     else:
         text = open(path, encoding="utf-8").read()
     return [line.strip() for line in text.split("\n") if line.strip()]
+
+
+def melody_from(args, notes=None):
+    """The melody, however the writer chose to hand it over.
+
+    Numbered notation and a MIDI export both beat retyping letter names, and
+    retyping is where transcription errors come from.
+    """
+    sources = [bool(notes), bool(args.degrees), bool(args.midi)]
+    if sum(sources) > 1:
+        raise SystemExit("give the melody once: as notes, --degrees, or --midi")
+    if args.midi:
+        return midi.read(args.midi, track=args.track)
+    if args.degrees:
+        return parse_degrees(args.degrees, key=args.key, octave=args.octave)
+    if notes:
+        return parse_melody(notes)
+    raise SystemExit("no melody given. Pass notes, --degrees, or --midi")
+
+
+def melody_options(parser):
+    parser.add_argument("--degrees", metavar="'1 2 3 5'",
+                        help="numbered notation (簡譜); ' up an octave, "
+                             ". down, #/b bend, 0 rest")
+    parser.add_argument("--midi", metavar="FILE.mid",
+                        help="read the melody from a MIDI export")
+    parser.add_argument("--track", type=int,
+                        help="which MIDI track, default the one with the "
+                             "most notes")
+    parser.add_argument("--octave", type=int, default=4,
+                        help="octave of degree 1 (default 4)")
 
 
 def parse_overrides(pairs):
@@ -55,7 +89,7 @@ def cmd_contour(args):
 
 def cmd_check(args):
     lexicon = Lexicon(parse_overrides(args.override))
-    result = check(args.text, args.melody, lexicon=lexicon)
+    result = check(args.text, melody_from(args, args.melody), lexicon=lexicon)
     if args.json:
         json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
         print()
@@ -82,6 +116,20 @@ def cmd_check(args):
     print(f"\nno violations in {result['syllables']} syllables"
           + (f", {len(result['unusual'])} unusual" if result["unusual"] else ""))
     return 0
+
+
+def cmd_fit(args):
+    report = repairs(args.text, melody_from(args, args.melody),
+                     keep_rhyme=not args.no_keep_rhyme,
+                     min_count=args.min_count, limit=args.limit,
+                     allow_unusual=args.allow_unusual,
+                     lexicon=Lexicon(parse_overrides(args.override)))
+    if args.json:
+        json.dump(report, sys.stdout, ensure_ascii=False, indent=2)
+        print()
+    else:
+        print(render_fit(report))
+    return 1 if report["check"]["violations"] else 0
 
 
 def cmd_tones(args):
@@ -114,10 +162,19 @@ def cmd_words(args):
         text, _, position = args.fits.rpartition(":")
         if not text or not position.isdigit():
             raise SystemExit("--fits wants LYRICS:INDEX, e.g. --fits 今日天氣真係好:2")
-        contour = build_contour(text, key=args.key, center=args.center,
-                                section=args.section)
-        pitches = [n["midi"] for n in contour["notes"]]
-        tones = [n["tone"] for n in contour["notes"]]
+        if args.degrees or args.midi or args.melody:
+            # The melody already exists, so use it rather than a draft of one.
+            pitches = melody_from(args, args.melody)
+            tones = [s["tone"] for s in
+                     syllabify(text, Lexicon()) if not s["skipped"]]
+            if len(pitches) != len(tones):
+                print(f"warning: {len(tones)} syllables but {len(pitches)} "
+                      f"notes\n")
+        else:
+            contour = build_contour(text, key=args.key, center=args.center,
+                                    section=args.section)
+            pitches = [n["midi"] for n in contour["notes"]]
+            tones = [n["tone"] for n in contour["notes"]]
         hits = words.fitting(pitches, tones, int(position), args.length,
                              allow_unusual=args.allow_unusual, **filters)
         here = text[int(position):int(position) + args.length]
@@ -186,9 +243,30 @@ def main(argv=None):
     p = subs.add_parser("check", parents=[common],
                         help="test a melody against the lyrics it carries")
     p.add_argument("text", help="one line of lyrics")
-    p.add_argument("melody", help="notes, e.g. 'F4 G4 A4 F4' or MIDI numbers")
+    p.add_argument("melody", nargs="?",
+                   help="notes, e.g. 'F4 G4 A4 F4' or MIDI numbers")
+    p.add_argument("--key", default="F major")
+    melody_options(p)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_check)
+
+    p = subs.add_parser("fit", parents=[common],
+                        help="the melody is written: fix the lyrics to it")
+    p.add_argument("text", help="one line of lyrics")
+    p.add_argument("melody", nargs="?",
+                   help="notes, e.g. 'F4 G4 A4 F4' or MIDI numbers")
+    p.add_argument("--key", default="F major")
+    melody_options(p)
+    p.add_argument("--min-count", type=int, default=2,
+                   help="least times a replacement appears in the corpus")
+    p.add_argument("--limit", type=int, default=6,
+                   help="options per bucket (default 6)")
+    p.add_argument("--no-keep-rhyme", action="store_true",
+                   help="allow a swap on the last syllable to change the rime")
+    p.add_argument("--allow-unusual", action="store_true",
+                   help="keep moves the corpus almost never makes")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_fit)
 
     p = subs.add_parser("tones", parents=[common],
                         help="show the jyutping and tone of each character")
@@ -211,6 +289,9 @@ def main(argv=None):
     p.add_argument("--key", default="F major")
     p.add_argument("--center", default="F4")
     p.add_argument("--section")
+    p.add_argument("--melody", metavar="NOTES",
+                   help="use this melody instead of drafting one")
+    melody_options(p)
     p.set_defaults(func=cmd_words)
 
     p = subs.add_parser("model", help="print the measured tone model")

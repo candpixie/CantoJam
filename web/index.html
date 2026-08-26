@@ -82,6 +82,50 @@
 
 <div id="lines"></div>
 
+<section class="finder" id="importer">
+  <h2>The melody already exists</h2>
+  <p class="hint">
+    If you wrote the tune first, paste it here instead of dragging notes into
+    place. One melody line per lyric line, in numbered notation
+    (<code>1 2 3 5</code>, where <code>'</code> lifts an octave, <code>.</code>
+    drops one, <code>#</code> and <code>b</code> bend a semitone and
+    <code>0</code> is a rest) or in note names (<code>F4 G4 A4</code>). A MIDI
+    export works too, and is split across the lines in order. Nothing is
+    uploaded: the file is read in this browser.
+  </p>
+  <textarea id="melody-in" spellcheck="false" rows="4"
+            placeholder="1 2 3 5 6 5 3&#10;5 5 6 5 3 2 1"></textarea>
+  <div class="controls">
+    <button id="apply-melody" class="primary">Use this melody</button>
+    <label class="filebtn" for="midi-in">Load MIDI</label>
+    <input type="file" id="midi-in" accept=".mid,.midi,audio/midi" hidden>
+    <span class="hint" id="import-note"></span>
+  </div>
+</section>
+
+<section class="finder" id="fixer">
+  <h2>Fix the lyrics to the melody</h2>
+  <p class="hint">
+    Every clash above, with words that would sit on those exact notes instead,
+    taken from what Cantopop lyricists actually wrote. Phrases come first
+    because the corpus wrote them as a unit; single characters fit the notes but
+    the sense is yours to judge. Click one to put it in the lyrics.
+  </p>
+  <div class="controls">
+    <label class="check">
+      <input type="checkbox" id="keep-rhyme" checked> Keep the line's rhyme
+    </label>
+    <label class="check">
+      <input type="checkbox" id="fix-unusual"> Include rare moves
+    </label>
+    <div class="field">
+      <label for="fix-min">Min uses <span id="fix-min-out">2</span></label>
+      <input type="range" id="fix-min" min="1" max="10" step="1" value="2">
+    </div>
+  </div>
+  <div id="fixer-results"></div>
+</section>
+
 <section class="finder" id="finder">
   <div class="finder-head">
     <h2>Word finder</h2>

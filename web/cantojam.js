@@ -521,3 +521,195 @@ export function fitting(pitches, lineTones, start, length,
   }
   return out;
 }
+
+// --- a melody that already exists ------------------------------------------
+
+const DEGREE_STEPS = { 1: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6 };
+
+export function parseMelody(melody) {
+  const tokens = Array.isArray(melody)
+    ? melody : String(melody).replace(/,/g, " ").trim().split(/\s+/);
+  return tokens.filter((t) => t !== "")
+    .map((t) => (typeof t === "number" ? t : parseNote(t)));
+}
+
+/* Numbered notation (簡譜) -> MIDI numbers. ' or ^ lifts an octave, . or ,
+   drops one, leading #/b bends a semitone, 0 is a rest and carries no
+   syllable. Songwriters who read 簡譜 can type a melody straight in. */
+export function parseDegrees(text, key = "F major", octave = 4) {
+  const { tonic, scale } = parseKey(key);
+  const base = (octave + 1) * 12 + tonic;
+  const out = [];
+  for (let token of String(text).replace(/,/g, " ").trim().split(/\s+/)) {
+    if (!token) continue;
+    let shift = 0;
+    while (token && "#b♯♭".includes(token[0])) {
+      shift += "#♯".includes(token[0]) ? 1 : -1;
+      token = token.slice(1);
+    }
+    let jump = 0;
+    while (token && "'^.,_".includes(token[token.length - 1])) {
+      jump += "'^".includes(token[token.length - 1]) ? 1 : -1;
+      token = token.slice(0, -1);
+    }
+    if (token === "0") continue;
+    if (!(token in DEGREE_STEPS)) {
+      throw new Error(`unknown scale degree: ${token}`);
+    }
+    const step = DEGREE_STEPS[token];
+    out.push(base + scale[step % scale.length]
+             + 12 * (Math.floor(step / scale.length) + jump) + shift);
+  }
+  return out;
+}
+
+/* A clash sits between two syllables. Replacing the phrase that spans it is
+   tried first, then the wider phrase, then either character alone. */
+const WINDOWS = [[-1, 2], [-1, 3], [0, 2], [-1, 1], [0, 1]];
+
+export function repairs(text, melody, {
+  keepRhyme = true, minCount = 2, limit = 6, allowUnusual = false,
+  overrides = {},
+} = {}) {
+  const pitches = parseMelody(melody);
+  const result = check(text, pitches, overrides);
+  const rows = result.rows;
+  const tones = rows.map((r) => r.tone);
+  const here = rows.map((r) => r.char);
+  const last = rows.length - 1;
+  const rhyme = rows.length && rows[last].jyutping ? rows[last].jyutping : null;
+
+  /* A candidate is admitted on the tones the corpus sang it with, but the
+     checker reads a polyphone with its most frequent reading. 爲何 is offered
+     as wai4 ho4 while 爲 defaults to wai6, and that one tone is the difference
+     between fitting and not. Name it rather than drop it. */
+  const readingNote = (entry) => {
+    const pins = [];
+    entry.j.split(/\s+/).forEach((syllable, i) => {
+      const char = entry.w[i];
+      if (toneOf(syllable) !== toneOf(lookup(char, overrides) || "")) {
+        pins.push(`${char}=${syllable}`);
+      }
+    });
+    return pins;
+  };
+
+  const problems = [];
+  for (const row of rows) {
+    if (!row.violation && !row.unusual) continue;
+    const phrases = [];
+    const singles = [];
+    const seen = new Set();
+    for (const [offset, length] of WINDOWS) {
+      const start = row.index + offset;
+      if (start < 0 || start + length > rows.length) continue;
+      const was = here.slice(start, start + length).join("");
+      const filters = { minCount };
+      if (keepRhyme && rhyme && start + length > last) filters.rimesWith = rhyme;
+      for (const entry of fitting(pitches, tones, start, length,
+                                  { allowUnusual, ...filters })) {
+        const key = `${start}:${entry.w}`;
+        if (entry.w === was || seen.has(key)) continue;
+        seen.add(key);
+        (length === 1 ? singles : phrases).push({
+          start, length, replaces: was, word: entry.w, jyutping: entry.j,
+          tones: entry.t, rime: entry.r, count: entry.n, pin: readingNote(entry),
+          line: here.slice(0, start).join("") + entry.w
+                + here.slice(start + length).join(""),
+        });
+      }
+    }
+    phrases.sort((a, b) => a.length - b.length || b.count - a.count);
+    singles.sort((a, b) => b.count - a.count);
+    problems.push({
+      index: row.index,
+      kind: row.violation ? "violation" : "unusual",
+      message: row.message || "",
+      phrases: phrases.slice(0, limit), singles: singles.slice(0, limit),
+      phraseTotal: phrases.length, singleTotal: singles.length,
+    });
+  }
+
+  return { check: result, problems, clean: problems.length === 0, line: text };
+}
+
+/* Read a melody out of a MIDI export. Notes starting on the same tick are one
+   chord and collapse to the top note, because a syllable is sung on one pitch. */
+export function readMidi(buffer, track = null) {
+  const data = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const text = (i) => String.fromCharCode(data[i], data[i + 1],
+                                          data[i + 2], data[i + 3]);
+  if (text(0) !== "MThd") throw new Error("not a MIDI file");
+
+  const varint = (i) => {
+    let value = 0;
+    for (;;) {
+      const byte = data[i];
+      i += 1;
+      value = (value << 7) | (byte & 0x7f);
+      if (!(byte & 0x80)) return [value, i];
+    }
+  };
+
+  const events = (start, end) => {
+    const out = [];
+    let i = start;
+    let tick = 0;
+    let status = null;
+    while (i < end) {
+      let delta;
+      [delta, i] = varint(i);
+      tick += delta;
+      if (i >= end) break;
+      const byte = data[i];
+      if (byte === 0xff) {
+        i += 2;
+        let length;
+        [length, i] = varint(i);
+        i += length;
+        continue;
+      }
+      if (byte === 0xf0 || byte === 0xf7) {
+        i += 1;
+        let length;
+        [length, i] = varint(i);
+        i += length;
+        continue;
+      }
+      if (byte & 0x80) { status = byte; i += 1; }
+      if (status === null) break;
+      const kind = status & 0xf0;
+      if (kind === 0xc0 || kind === 0xd0) { i += 1; continue; }
+      const pitch = data[i];
+      const velocity = data[i + 1];
+      i += 2;
+      if (kind === 0x90 && velocity > 0) out.push([tick, pitch]);
+    }
+    return out;
+  };
+
+  const format = view.getUint16(8);
+  const tracks = [];
+  let i = 8 + view.getUint32(4);
+  while (i < data.length && text(i) === "MTrk") {
+    const length = view.getUint32(i + 4);
+    tracks.push([i + 8, i + 8 + length]);
+    i += 8 + length;
+  }
+  if (!tracks.length) throw new Error("no tracks in this MIDI file");
+
+  const parsed = tracks.map(([a, b]) => events(a, b));
+  let chosen;
+  if (track !== null) chosen = parsed[track];
+  else if (format === 0) chosen = parsed[0];
+  // Type 1 usually puts tempo and key alone on track 0. Take whichever track
+  // carries the most notes rather than guessing by position.
+  else chosen = parsed.reduce((a, b) => (b.length > a.length ? b : a), []);
+
+  const byTick = new Map();
+  for (const [tick, pitch] of chosen) {
+    byTick.set(tick, Math.max(byTick.get(tick) ?? -1, pitch));
+  }
+  return [...byTick.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+}

@@ -99,3 +99,40 @@ def check(text, melody, lexicon=None, model=None, overrides=None):
         "notes": len(pitches),
         "length_mismatch": len(pitches) != len(sung),
     }
+
+
+DEGREE_STEPS = {"1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5, "7": 6}
+
+
+def parse_degrees(text, key="F major", octave=4):
+    """Numbered notation (簡譜) -> MIDI numbers.
+
+    '1 2 3 5' is do re mi sol. A trailing ' or ^ lifts an octave, a trailing
+    . or , drops one, and a leading # or b bends the degree by a semitone.
+    0 is a rest and is dropped, because a rest carries no syllable.
+
+    Songwriters who sight-read 簡譜 can type a melody straight in, which is
+    faster and less error prone than converting every note to a letter name.
+    """
+    from .contour import parse_key
+
+    tonic, scale = parse_key(key)
+    base = (octave + 1) * 12 + tonic
+    out = []
+    for token in str(text).replace(",", " ").split():
+        shift = 0
+        while token and token[0] in "#b♯♭":
+            shift += 1 if token[0] in "#♯" else -1
+            token = token[1:]
+        jump = 0
+        while token and token[-1] in "'^.,_":
+            jump += 1 if token[-1] in "'^" else -1
+            token = token[:-1]
+        if token == "0":
+            continue
+        if token not in DEGREE_STEPS:
+            raise ValueError(f"unknown scale degree: {token}")
+        step = DEGREE_STEPS[token]
+        out.append(base + scale[step % len(scale)]
+                   + 12 * (step // len(scale) + jump) + shift)
+    return out

@@ -41,12 +41,17 @@ function rebuildLines({ keepEdits = true } = {}) {
 
   state.lines = texts.map((text, i) => {
     const previous = state.lines[i];
-    const sung = cj.syllabify(text).filter((s) => !s.skipped && s.tone);
-    const unresolved = cj.syllabify(text)
-      .filter((s) => !s.skipped && !s.tone).map((s) => s.char);
+    // Every syllable the model does not skip gets a note, including one the
+    // lexicon cannot read. buildContour and check both count them, so dropping
+    // them here would shift the grid, the slot list and the word finder by one
+    // for every unreadable character in the line.
+    const sung = cj.syllabify(text).filter((s) => !s.skipped);
+    const unresolved = sung.filter((s) => !s.tone).map((s) => s.char);
 
+    // Text equality is deliberately not required. When the melody is the fixed
+    // thing and the words are being rewritten to fit it, redrafting on every
+    // word swap would throw away the melody the writer came in with.
     const reusable = keepEdits && previous && previous.edited &&
-                     previous.text === text &&
                      previous.pitches.length === sung.length;
     const pitches = reusable
       ? previous.pitches.slice()
@@ -223,8 +228,8 @@ function buildGrid(line, lineIndex, result) {
     const group = svgEl("g", {
       class: `note${line.edited ? " edited" : ""}${bad ? " bad" : ""}`,
       tabindex: 0, role: "slider",
-      "aria-label": `${syllable.char} ${syllable.jyutping}, ` +
-                    `${cj.noteName(line.pitches[i])}`,
+      "aria-label": `${syllable.char} ${syllable.jyutping || "reading unknown"}` +
+                    `, ${cj.noteName(line.pitches[i])}`,
       "aria-valuenow": line.pitches[i],
       "data-line": lineIndex, "data-index": i,
     });
@@ -233,7 +238,7 @@ function buildGrid(line, lineIndex, result) {
     const han = svgEl("text", { class: "han", x: x(i), y: height - 20 });
     han.textContent = syllable.char;
     const meta = svgEl("text", { class: "meta", x: x(i), y: height - 7 });
-    meta.textContent = syllable.jyutping;
+    meta.textContent = syllable.jyutping || "?";
     svg.append(group, han, meta);
     // Label a note only when the pitch actually changes. Labelling every one
     // buries the contour under text.
@@ -656,12 +661,194 @@ function insertWord(entry) {
   runFinder();
 }
 
+
+// ----------------------------------------------- a melody written elsewhere
+
+/* Numbered notation or note names, whichever the writer reached for. A line
+   of bare digits is 簡譜 far more often than it is MIDI note numbers, and
+   guessing wrong is silent, so the digits decide it: 1-7 with the usual
+   octave and accidental marks reads as degrees. */
+function parseMelodyLine(text) {
+  const tokens = text.replace(/,/g, " ").trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
+  const degreeish = tokens.every((t) => /^[#b♯♭]?[0-7]['^.,_]*$/.test(t));
+  return degreeish
+    ? cj.parseDegrees(text, state.key, cj.parseNote(state.center) >= 60 ? 4 : 3)
+    : cj.parseMelody(text);
+}
+
+function applyMelody(perLine, label) {
+  const notes = [];
+  let used = 0;
+  state.lines.forEach((line, i) => {
+    const wanted = line.pitches.length;
+    const given = perLine[i] || [];
+    if (!given.length) return;
+    line.pitches = given.slice(0, wanted);
+    while (line.pitches.length < wanted) {
+      line.pitches.push(line.pitches[line.pitches.length - 1] ??
+                        cj.parseNote(state.center));
+    }
+    line.edited = true;
+    used += 1;
+    if (given.length !== wanted) {
+      notes.push(`line ${i + 1}: ${wanted} syllables but ${given.length} notes`);
+    }
+  });
+  el("import-note").textContent = used
+    ? `${label} onto ${used} line${used === 1 ? "" : "s"}.` +
+      (notes.length ? ` Check ${notes.join("; ")}.` : "")
+    : "No melody found to apply.";
+  render();
+  runFixer();
+  scheduleSave();
+}
+
+function applyTypedMelody() {
+  const rows = el("melody-in").value.split("\n");
+  let parsed;
+  try {
+    parsed = rows.map((row) => (row.trim() ? parseMelodyLine(row) : []));
+  } catch (error) {
+    el("import-note").textContent = String(error.message || error);
+    return;
+  }
+  applyMelody(parsed, "Melody applied");
+}
+
+async function loadMidiFile(file) {
+  let pitches;
+  try {
+    pitches = cj.readMidi(await file.arrayBuffer());
+  } catch (error) {
+    el("import-note").textContent = `Could not read that file: ${error.message}`;
+    return;
+  }
+  // The file has no idea where the lyric lines break, so hand the notes out in
+  // order, as many as each line has syllables.
+  const perLine = [];
+  let at = 0;
+  for (const line of state.lines) {
+    perLine.push(pitches.slice(at, at + line.pitches.length));
+    at += line.pitches.length;
+  }
+  el("melody-in").value = perLine
+    .map((row) => row.map(cj.noteName).join(" ")).join("\n");
+  const spare = pitches.length - at;
+  applyMelody(perLine, `Read ${pitches.length} notes from ${file.name}` +
+    (spare > 0 ? `, ${spare} left over` : "") + " and put them");
+}
+
+// ------------------------------------------------------ repair the lyrics
+
+function swapButton(option, lineIndex) {
+  const button = document.createElement("button");
+  button.className = "swap";
+  button.type = "button";
+  const pin = option.pin.length
+    ? `<span class="pin">sing ${option.pin.join(" ")}</span>` : "";
+  button.innerHTML =
+    `<span class="was">${option.replaces}</span> \u2192 ` +
+    `<span class="now">${option.word}</span>` +
+    `<span class="meta">${option.jyutping} · tones ${option.tones} · ` +
+    `-${option.rime} · ${option.count}\u00d7</span>${pin}` +
+    `<span class="after">${option.line}</span>`;
+  button.onclick = () => replaceInLine(lineIndex, option);
+  return button;
+}
+
+function replaceInLine(lineIndex, option) {
+  const line = state.lines[lineIndex];
+  if (!line) return;
+  const texts = el("lyrics").value.split("\n");
+  const rowIndex = texts.reduce((found, text, i) =>
+    (found === -1 && text.trim() === line.text ? i : found), -1);
+  if (rowIndex === -1) return;
+  texts[rowIndex] = option.line;
+  el("lyrics").value = texts.join("\n");
+  // The melody is the fixed thing here, so the edited pitches must survive.
+  refresh({ keepEdits: true });
+  syncSlotSelect();
+  runFixer();
+}
+
+function runFixer() {
+  const host = el("fixer-results");
+  host.textContent = "";
+  if (!cj.wordsLoaded()) {
+    host.textContent = "Loading the word list\u2026";
+    cj.loadWords().then(runFixer);
+    return;
+  }
+
+  const options = {
+    keepRhyme: el("keep-rhyme").checked,
+    allowUnusual: el("fix-unusual").checked,
+    minCount: parseInt(el("fix-min").value, 10),
+    limit: 6,
+  };
+
+  let found = 0;
+  state.lines.forEach((line, lineIndex) => {
+    const report = cj.repairs(line.text, line.pitches, options);
+    if (report.clean) return;
+    found += report.problems.length;
+
+    const heading = document.createElement("p");
+    heading.className = "bucket";
+    heading.textContent = `Line ${lineIndex + 1}: ${line.text}`;
+    host.append(heading);
+
+    for (const problem of report.problems) {
+      const block = document.createElement("div");
+      block.className = problem.kind === "violation" ? "problem" : "problem rare";
+      const title = document.createElement("h3");
+      const row = report.check.rows[problem.index];
+      title.textContent = `${row.char} on ${row.note}`;
+      const why = document.createElement("p");
+      why.className = "why";
+      why.textContent = problem.message;
+      block.append(title, why);
+
+      for (const [list, total, label] of [
+        [problem.phrases, problem.phraseTotal,
+         "phrases the corpus wrote as a unit"],
+        [problem.singles, problem.singleTotal,
+         "single characters that fit the notes, sense is yours to judge"],
+      ]) {
+        if (!list.length) continue;
+        const bucket = document.createElement("p");
+        bucket.className = "bucket";
+        bucket.textContent = total > list.length
+          ? `${label} (${list.length} of ${total})` : label;
+        block.append(bucket);
+        for (const option of list) block.append(swapButton(option, lineIndex));
+      }
+      if (!problem.phrases.length && !problem.singles.length) {
+        const none = document.createElement("p");
+        none.className = "why";
+        none.textContent = "Nothing in the corpus fits here. Try including " +
+          "rare moves, lowering the minimum uses, letting the rhyme change, " +
+          "or moving the note instead.";
+        block.append(none);
+      }
+      host.append(block);
+    }
+  });
+
+  if (!found) {
+    host.textContent = "No clashes. The lyrics sit on this melody as written.";
+  }
+}
+
 // ------------------------------------------------------------------- wire
 
 function refresh({ keepEdits = true } = {}) {
   rebuildLines({ keepEdits });
   render();
+  syncSlotSelect();
   scheduleSave();
+  runFixer();
 }
 
 const incoming = share.readIncoming();
@@ -699,6 +886,20 @@ el("mincount").addEventListener("input", () => {
 });
 for (const id of ["wlen", "rhyme", "contains", "tonepat"]) {
   el(id).addEventListener("change", runFinder);
+}
+
+el("apply-melody").onclick = applyTypedMelody;
+el("midi-in").addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  if (file) loadMidiFile(file);
+  event.target.value = "";
+});
+el("fix-min").addEventListener("input", () => {
+  el("fix-min-out").textContent = el("fix-min").value;
+  runFixer();
+});
+for (const id of ["keep-rhyme", "fix-unusual"]) {
+  el(id).addEventListener("change", runFixer);
 }
 
 el("share").onclick = copyShareLink;
