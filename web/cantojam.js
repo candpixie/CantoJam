@@ -69,27 +69,48 @@ export function isHan(char) {
   return HAN.test(char);
 }
 
-/** Split a line into syllables. Non-Han characters are kept but flagged. */
+const LATIN = /[A-Za-z][A-Za-z'\u2019-]*/y;
+
+/* Split a line into syllables.
+
+   Cantopop is full of English words and vocables, and they are sung: "block"
+   in 一首song takes a note like any other syllable. So a run of latin letters
+   becomes one entry that occupies a note and carries no tone, rather than one
+   skipped entry per letter, which would drop the note and shift every syllable
+   after it. Punctuation is still skipped, and reported. */
 export function syllabify(text, overrides = {}) {
   const out = [];
-  for (const char of text) {
-    if (!isHan(char)) {
-      if (char.trim()) {
-        out.push({ char, jyutping: null, tone: null, source: null,
-                   ambiguous: false, skipped: true });
-      }
+  let i = 0;
+  while (i < text.length) {
+    const char = text[i];
+    if (isHan(char)) {
+      const jyutping = lookup(char, overrides);
+      out.push({
+        char,
+        jyutping,
+        tone: toneOf(jyutping),
+        source: sourceOf(char, overrides),
+        ambiguous: !Object.prototype.hasOwnProperty.call(overrides, char) &&
+                   readings(char, overrides).length > 1,
+        skipped: false,
+        latin: false,
+      });
+      i += 1;
       continue;
     }
-    const jyutping = lookup(char, overrides);
-    out.push({
-      char,
-      jyutping,
-      tone: toneOf(jyutping),
-      source: sourceOf(char, overrides),
-      ambiguous: !Object.prototype.hasOwnProperty.call(overrides, char) &&
-                 readings(char, overrides).length > 1,
-      skipped: false,
-    });
+    LATIN.lastIndex = i;
+    const match = LATIN.exec(text);
+    if (match) {
+      out.push({ char: match[0], jyutping: null, tone: null, source: null,
+                 ambiguous: false, skipped: false, latin: true });
+      i = LATIN.lastIndex;
+      continue;
+    }
+    if (char.trim()) {
+      out.push({ char, jyutping: null, tone: null, source: null,
+                 ambiguous: false, skipped: true, latin: false });
+    }
+    i += 1;
   }
   return out;
 }

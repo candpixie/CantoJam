@@ -39,6 +39,8 @@ LINES = [
     "街市啲生果好新鮮",
     "呢個係我嘅位置",
     "未畏龘忍淚",          # contains a syllable the lexicon cannot read
+    "聽一首song 就夠",   # an english word, sung on one note
+    "「oh」一聲 都不說",   # english plus punctuation the model skips
 ]
 
 KEYS = ["F major", "C major", "G major", "Bb major", "A minor", "D dorian"]
@@ -84,7 +86,8 @@ const out = { syllabify: {}, contour: {}, check: {}, model: {},
 for (const line of lines) {
   out.syllabify[line] = cj.syllabify(line).map(s => [s.char, s.jyutping,
                                                      s.tone, s.source,
-                                                     s.ambiguous, s.skipped]);
+                                                     s.ambiguous, s.skipped,
+                                                     s.latin]);
   out.contour[line] = {};
   for (const key of keys) {
     for (const spread of [1.0, 2.0]) {
@@ -168,7 +171,8 @@ class TestParity:
     def test_syllabify(self, js):
         for line in LINES:
             mine = [[s["char"], s["jyutping"], s["tone"], s["source"],
-                     s["ambiguous"], s["skipped"]] for s in syllabify(line)]
+                     s["ambiguous"], s["skipped"], s["latin"]]
+                    for s in syllabify(line)]
             assert mine == js["syllabify"][line], f"syllabify differs on {line}"
 
     def test_note_names(self, js):

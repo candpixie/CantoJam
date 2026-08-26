@@ -63,11 +63,16 @@ class TestLexicon:
         assert rows[0]["jyutping"] == "m4"
         assert rows[0]["tone"] == "4"
 
-    def test_latin_is_skipped_not_dropped(self, lexicon):
-        rows = syllabify("一個block", lexicon)
-        assert [r["char"] for r in rows] == ["一", "個", "b", "l", "o", "c", "k"]
-        assert all(r["skipped"] for r in rows[2:])
-        assert not any(r["skipped"] for r in rows[:2])
+    def test_a_latin_word_is_one_syllable_not_one_per_letter(self, lexicon):
+        """It is sung on a note, so it has to occupy exactly one.
+
+        Skipping it letter by letter both dropped the note and, because each
+        letter was its own entry, shifted every syllable after it.
+        """
+        rows = syllabify("一首song", lexicon)
+        assert [r["char"] for r in rows] == ["一", "首", "song"]
+        assert not any(r["skipped"] for r in rows)
+        assert rows[2]["latin"] and rows[2]["tone"] is None
 
 
 class TestModel:
@@ -403,3 +408,34 @@ def test_keeping_the_rhyme_protects_the_last_syllable():
 def rime_of(jyutping):
     from cantojam.lexicon import rime
     return rime(jyutping)
+
+
+def test_an_english_word_is_one_sung_syllable():
+    """Cantopop sings English words, so they take a note like anything else.
+
+    Letter-by-letter skipping dropped the note and shifted every syllable after
+    it, which is the same failure as dropping an unreadable character.
+    """
+    syllables = syllabify("聽一首song 就夠")
+    assert [s["char"] for s in syllables] == list("聽一首") + ["song"] + list("就夠")
+    word = syllables[3]
+    assert word["latin"] and not word["skipped"] and word["tone"] is None
+
+    sung = [s for s in syllables if not s["skipped"]]
+    assert len(build_contour("聽一首song 就夠")["notes"]) == len(sung)
+
+
+def test_punctuation_is_still_skipped():
+    syllables = syllabify("「oh」一聲")
+    assert [s["char"] for s in syllables] == ["「", "oh", "」", "一", "聲"]
+    assert [s["skipped"] for s in syllables] == [True, False, True, False, False]
+
+
+def test_a_melody_lines_up_across_an_english_word():
+    """The whole point: the notes after the English word must stay put."""
+    line = "聽一首song 就夠"
+    melody = [n["midi"] for n in build_contour(line)["notes"]]
+    rows = check(line, melody)["rows"]
+    assert [r["char"] for r in rows] == ["聽", "一", "首", "song", "就", "夠"]
+    assert rows[3]["tone"] is None       # no tone rule reaches across it
+    assert not rows[3]["violation"] and not rows[4]["violation"]

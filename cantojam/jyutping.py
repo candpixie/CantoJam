@@ -71,29 +71,53 @@ def is_han(char):
     return bool(HAN.match(char))
 
 
+LATIN = re.compile(r"[A-Za-z][A-Za-z'\u2019-]*")
+
+
 def syllabify(text, lexicon=None):
     """Split a line of lyrics into syllables.
 
     Returns a list of dicts with the character, its jyutping, its tone, where
     the reading came from, and whether the character has more than one reading.
-    Non-Han characters (punctuation, latin words like "block") are skipped, but
-    reported so nothing silently vanishes.
+
+    Cantopop is full of English words and vocables, and they are sung: "block"
+    in 一首song takes a note like any other syllable. So a run of latin letters
+    becomes one entry that occupies a note and carries no tone, rather than one
+    skipped entry per letter, which would drop the note and shift every
+    syllable after it. One word is treated as one note, which is right for the
+    short words that actually appear in lyrics and wrong for a long one; the
+    entry is marked latin so a caller can tell.
+
+    Punctuation is still skipped, and reported so nothing silently vanishes.
     """
     lexicon = lexicon or Lexicon()
     out = []
-    for char in text:
-        if not is_han(char):
-            if not char.isspace():
-                out.append({"char": char, "jyutping": None, "tone": None,
-                            "source": None, "ambiguous": False, "skipped": True})
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if is_han(char):
+            jyutping = lexicon.lookup(char)
+            out.append({
+                "char": char,
+                "jyutping": jyutping,
+                "tone": tone_of(jyutping) if jyutping else None,
+                "source": lexicon.source(char),
+                "ambiguous": lexicon.is_ambiguous(char),
+                "skipped": False,
+                "latin": False,
+            })
+            i += 1
             continue
-        jyutping = lexicon.lookup(char)
-        out.append({
-            "char": char,
-            "jyutping": jyutping,
-            "tone": tone_of(jyutping) if jyutping else None,
-            "source": lexicon.source(char),
-            "ambiguous": lexicon.is_ambiguous(char),
-            "skipped": False,
-        })
+        match = LATIN.match(text, i)
+        if match:
+            out.append({"char": match.group(0), "jyutping": None, "tone": None,
+                        "source": None, "ambiguous": False, "skipped": False,
+                        "latin": True})
+            i = match.end()
+            continue
+        if not char.isspace():
+            out.append({"char": char, "jyutping": None, "tone": None,
+                        "source": None, "ambiguous": False, "skipped": True,
+                        "latin": False})
+        i += 1
     return out
