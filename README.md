@@ -70,6 +70,12 @@ tone 6  -1.34   陽去
 tone 4  -4.31   陽平     <- a cliff, not a rung
 ```
 
+![The 0243 ladder against measured tone height: tone 5 crosses up to sit with
+tone 3, and tone 4 drops far below its predicted rung.](docs/tone-levels.svg)
+
+Regenerate with `python3 scripts/figure_tone_levels.py`. It reads
+`cantojam/data/model.json` and uses only the standard library.
+
 Two corrections to the four-level model fall out of this:
 
 1. **Tones 5 and 6 are not interchangeable.** 0243 buckets them together. In
