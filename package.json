@@ -1,0 +1,17 @@
+{
+  "name": "cantojam",
+  "version": "0.2.0",
+  "description": "Cantonese tone-melody fit (協音) for Cantopop lyric writing: tone check, contour drafting, corpus word finder.",
+  "license": "MIT",
+  "author": "Candy Xie",
+  "repository": { "type": "git", "url": "git+https://github.com/candpixie/cantojam.git" },
+  "homepage": "https://cantojam.vercel.app",
+  "keywords": ["cantonese", "cantopop", "jyutping", "lyrics", "tone", "melody", "songwriting"],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./web/cantojam.d.ts", "import": "./web/cantojam.js" }
+  },
+  "types": "./web/cantojam.d.ts",
+  "files": ["web/cantojam.js", "web/cantojam.d.ts", "web/data.js", "web/lexicon.js", "DATA_LICENSE.md", "ATTRIBUTION.md"]
+}
